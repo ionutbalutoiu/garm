@@ -1,14 +1,18 @@
 name: Integration Tests
+
 on:
   push:
     branches:
-      - main
+      - test-e2e-wip
   pull_request:
     branches:
-      - main
+      - test-e2e-wip
+
+concurrency:
+  group: integration-tests
 
 jobs:
-  garm-cli-test:
+  integration-tests:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -19,156 +23,51 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - run: go version
-
       - name: Setup LXD
         uses: canonical/setup-lxd@v0.1.1
 
       - name: Build GARM
         run: make build
 
-      - name: Setup GARM server
-        shell: bash
-        run: |
-          set -e
-          set -o pipefail
+      - name: Setup GARM
+        run: sudo --preserve-env ./test/integration/scripts/setup-garm.sh
+        env:
+          OAUTH_TOKEN: ${{ secrets.OAUTH_TOKEN }}
+          CREDENTIALS_NAME: test-garm-creds
 
-          sudo useradd --shell /usr/bin/false --system --groups lxd --no-create-home garm
-          sudo mkdir -p /etc/garm /var/log/garm
+      - name: Setup ngrok tunnel
+        run: sudo --preserve-env ./test/integration/scripts/setup-ngrok.sh
+        env:
+          NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
+          NGROK_DOMAIN: incredibly-feasible-gibbon.ngrok-free.app
 
-          # Use the LXD bridge IP address as the GARM metadata address.
-          GARM_METADATA_IP=$(sudo lxc network ls -f json | jq -r '.[] | select(.name=="lxdbr0") | .config."ipv4.address"' | cut -d '/' -f1)
-
-          cat > config.toml << EOF
-          [default]
-          callback_url = "http://${GARM_METADATA_IP}:9997/api/v1/callbacks/status"
-          metadata_url = "http://${GARM_METADATA_IP}:9997/api/v1/metadata"
-
-          [metrics]
-          enable = true
-          disable_auth = false
-
-          [jwt_auth]
-          secret = ")9gk_4A6KrXz9D2u'0@MPea*sd6W'%@5MAWpWWJ3P3EqW~qB!!(Vd$FhNc*eU4vG"
-          time_to_live = "8760h"
-
-          [apiserver]
-            bind = "0.0.0.0"
-            port = 9997
-            use_tls = false
-
-          [database]
-            backend = "sqlite3"
-            passphrase = "shreotsinWadquidAitNefayctowUrph"
-            [database.sqlite3]
-              db_file = "/etc/garm/garm.db"
-
-          [[provider]]
-            name = "lxd_local"
-            provider_type = "lxd"
-            description = "Local LXD installation"
-            [provider.lxd]
-              unix_socket_path = "/var/snap/lxd/common/lxd/unix.socket"
-              include_default_profile = false
-              instance_type = "container"
-              secure_boot = false
-              project_name = "default"
-              url = ""
-              client_certificate = ""
-              client_key = ""
-              tls_server_certificate = ""
-              [provider.lxd.image_remotes]
-                [provider.lxd.image_remotes.ubuntu]
-                  addr = "https://cloud-images.ubuntu.com/releases"
-                  public = true
-                  protocol = "simplestreams"
-                  skip_verify = false
-                [provider.lxd.image_remotes.ubuntu_daily]
-                  addr = "https://cloud-images.ubuntu.com/daily"
-                  public = true
-                  protocol = "simplestreams"
-                  skip_verify = false
-                [provider.lxd.image_remotes.images]
-                  addr = "https://images.linuxcontainers.org"
-                  public = true
-                  protocol = "simplestreams"
-                  skip_verify = false
-          EOF
-          sudo mv config.toml /etc/garm/config.toml
-          sudo chown -R garm:garm /etc/garm /var/log/garm
-
-          sudo mv ./bin/* /usr/local/bin/
-          sudo cp ./contrib/garm.service /etc/systemd/system/garm.service
-
-          sudo systemctl daemon-reload
-          sudo systemctl start garm
-
-          wait_open_port() {
-              local ADDRESS="$1"
-              local PORT="$2"
-              local TIMEOUT=30
-              SECONDS=0
-              while true; do
-                  if [[ $SECONDS -gt $TIMEOUT ]]; then
-                      echo "ERROR: Port $PORT didn't open at $ADDRESS within $TIMEOUT seconds"
-                      return 1
-                  fi
-                  nc -v -w 5 -z "$ADDRESS" "$PORT" &>/dev/null && break || sleep 1
-              done
-              echo "Port $PORT at address $ADDRESS is open"
-          }
-
-          wait_open_port 127.0.0.1 9997
-
-      - name: Test GARM API with garm-cli tool
-        shell: bash
-        run: |
-          set -e
-          set -x
-          set -o pipefail
-
-          GARM_URL="http://127.0.0.1:9997"
-          ADMIN_USERNAME='admin'
-          ADMIN_PASWORD='Ma*jirksiCr9esrT8DGQPrfx*XKnBVZo'
-
-          garm-cli init --debug \
-            --name="local_garm" \
-            --url $GARM_URL \
-            --email root@localhost \
-            --username $ADMIN_USERNAME \
-            --password $ADMIN_PASWORD
-
-          garm-cli profile add --debug \
-            --name="local_garm_2" \
-            --url $GARM_URL \
-            --username $ADMIN_USERNAME \
-            --password $ADMIN_PASWORD
-
-          garm-cli profile login --debug \
-            --username $ADMIN_USERNAME \
-            --password $ADMIN_PASWORD
-
-          garm-cli metrics-token --debug create
-
-          garm-cli provider --debug list
-
-          garm-cli profile --debug list
-
-          garm-cli runner --debug list --all
-
-          garm-cli credentials --debug list
-
-          garm-cli job --debug list
-
-          garm-cli org --debug list
-
-          garm-cli repo --debug list
-
-          garm-cli enterprise --debug list
-
-          garm-cli pool --debug list --all
+      - name: Run integration tests
+        run: go run ./test/integration/main.go
+        env:
+          GARM_BASE_URL: https://incredibly-feasible-gibbon.ngrok-free.app
+          GARM_USERNAME: admin
+          GARM_PASSWORD: ${{ secrets.GARM_ADMIN_PASSWORD }}
+          GARM_FULLNAME: "Local GARM Admin"
+          GARM_EMAIL: admin@example.com
+          GARM_NAME: local_garm
+          CREDENTIALS_NAME: test-garm-creds
+          ORG_WEBHOOK_SECRET: ${{ secrets.ORG_WEBHOOK_SECRET }}
+          REPO_WEBHOOK_SECRET: ${{ secrets.REPO_WEBHOOK_SECRET }}
 
       - name: Show GARM logs
+        if: always()
         run: |
           sudo systemctl status garm
           sudo journalctl -u garm --no-pager
+
+      - name: Show ngrok-tunnel logs
+        if: always()
+        run: |
+          sudo systemctl status ngrok-tunnel
+          sudo journalctl -u ngrok-tunnel --no-pager
+
+      - name: Cleanup after integration tests
+        if: always()
+        run: sudo --preserve-env ./test/integration/scripts/cleanup.sh
+        env:
+          GH_TOKEN: ${{ secrets.OAUTH_TOKEN }}
